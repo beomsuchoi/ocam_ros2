@@ -276,25 +276,23 @@ private:
                 return this->on_parameter_change(parameters);
             });
 
-        // image_transport 초기화 - 토픽 이름을 파라미터에서 가져온 값으로 사용
-        image_transport::ImageTransport it(shared_from_this());
-        auto camera_image_pub = it.advertise(image_topic_, 1);
+        auto qos_profile = rclcpp::QoS(rclcpp::KeepLast(1))
+                               .reliable()
+                               .durability_volatile();
 
-        auto camera_info_pub = this->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic_, 1);
+        image_transport::ImageTransport it(shared_from_this());
+        auto camera_image_pub = it.advertise(image_topic_, qos_profile.get_rmw_qos_profile());
+
+        auto camera_info_pub = this->create_publisher<sensor_msgs::msg::CameraInfo>(
+            camera_info_topic_, qos_profile);
 
         sensor_msgs::msg::CameraInfo camera_info;
-
-        RCLCPP_INFO(this->get_logger(), "Loading from ROS calibration files");
 
         camera_info_manager::CameraInfoManager info_manager(shared_from_this().get());
         info_manager.loadCameraInfo("package://ocam_ros2/config/camera.yaml");
         camera_info = info_manager.getCameraInfo();
 
         camera_info.header.frame_id = camera_frame_id_;
-
-        RCLCPP_INFO(this->get_logger(), "Got camera calibration files");
-        RCLCPP_INFO(this->get_logger(), "Publishing to topics: %s, %s",
-                    image_topic_.c_str(), camera_info_topic_.c_str());
 
         // 이미지 처리 루프
         cv::Mat camera_image;
