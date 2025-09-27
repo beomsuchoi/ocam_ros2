@@ -15,7 +15,7 @@ def generate_launch_description():
             name='ocam_front_node',
             parameters=[
                 {'device_name': '/dev/ocam_front'},
-                {'frame_id': 'ocam_front_frame'},
+                {'camera_frame_id': 'ocam_front_frame'},
                 {'resolution': 2},
                 {'frame_rate': 30.0},
                 {'exposure': 100},
@@ -23,7 +23,7 @@ def generate_launch_description():
                 {'wb_blue': 200},
                 {'wb_red': 160},
                 {'auto_exposure': True},
-                {'show_image': True}
+                {'show_image': False}
             ],
             remappings=[
                 ('/image_raw', '/ocam_front/image_raw'),
@@ -38,7 +38,7 @@ def generate_launch_description():
             name='ocam_backup_node',
             parameters=[
                 {'device_name': '/dev/ocam_backup'},
-                {'frame_id': 'ocam_backup_frame'},
+                {'camera_frame_id': 'ocam_backup_frame'},
                 {'resolution': 2},
                 {'frame_rate': 30.0},
                 {'exposure': 100},
@@ -46,7 +46,7 @@ def generate_launch_description():
                 {'wb_blue': 200},
                 {'wb_red': 160},
                 {'auto_exposure': True},
-                {'show_image': True}
+                {'show_image': False}
             ],
             remappings=[
                 ('/image_raw', '/ocam_backup/image_raw'),

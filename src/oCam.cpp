@@ -28,6 +28,10 @@ private:
     std::vector<Withrobot::usb_device_info> dev_list;
     std::string devPath_;
 
+    cv::Mat srcImg_;
+    cv::Mat dstImg_;
+    bool buffers_initialized_ = false;
+
 public:
     // 생성자에 device_path 파라미터 추가
     Camera(int resolution, double frame_rate, const std::string &device_path = "") : camera(NULL)
@@ -116,6 +120,8 @@ public:
         camera->get_current_format(camFormat);
         camFormat.print();
 
+        initializeBuffers();
+
         /* Withrobot camera start */
         camera->start();
     }
@@ -124,6 +130,13 @@ public:
     {
         camera->stop();
         delete camera;
+    }
+
+    void initializeBuffers()
+    {
+        srcImg_ = cv::Mat(cv::Size(camFormat.width, camFormat.height), CV_8UC1);
+        dstImg_ = cv::Mat(cv::Size(camFormat.width, camFormat.height), CV_8UC3);
+        buffers_initialized_ = true;
     }
 
     void enum_dev_list(std::vector<Withrobot::usb_device_info> dev_list)
@@ -207,13 +220,15 @@ public:
 
     bool getImages(cv::Mat &image)
     {
-        cv::Mat srcImg(cv::Size(camFormat.width, camFormat.height), CV_8UC1);
-        cv::Mat dstImg;
-
-        if (camera->get_frame(srcImg.data, camFormat.image_size, 1) != -1)
+        if (!buffers_initialized_)
         {
-            cvtColor(srcImg, dstImg, cv::COLOR_BayerGR2RGB);
-            image = dstImg;
+            return false;
+        }
+
+        if (camera->get_frame(srcImg_.data, camFormat.image_size, 1) != -1)
+        {
+            cv::cvtColor(srcImg_, dstImg_, cv::COLOR_BayerGR2RGB);
+            image = dstImg_;
             return true;
         }
         else
@@ -238,9 +253,9 @@ private:
     bool config_changed_;
 
     std::string camera_frame_id_;
-    std::string device_name_;       // 새로 추가
-    std::string image_topic_;       // 새로 추가
-    std::string camera_info_topic_; // 새로 추가
+    std::string device_name_;
+    std::string image_topic_;
+    std::string camera_info_topic_;
 
     Camera *ocam;
 
@@ -294,44 +309,93 @@ private:
 
         camera_info.header.frame_id = camera_frame_id_;
 
-        // 이미지 처리 루프
         cv::Mat camera_image;
-        rclcpp::Rate r(frame_rate_);
+
+        auto target_frame_duration = std::chrono::duration<double>(1.0 / frame_rate_);
+        auto last_frame_time = std::chrono::steady_clock::now();
+
+        int consecutive_failures = 0;
+        const int max_failures = 5;
 
         while (rclcpp::ok())
         {
+            auto frame_start_time = std::chrono::steady_clock::now();
             rclcpp::Time now = this->now();
 
             if (!ocam->getImages(camera_image))
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                consecutive_failures++;
+
+                auto wait_time = std::min(100, 20 + consecutive_failures * 10);
+                std::this_thread::sleep_for(std::chrono::milliseconds(wait_time));
+
+                if (consecutive_failures >= max_failures)
+                {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                         "Camera frame acquisition failing consistently. Reducing polling rate to save CPU.");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                }
                 continue;
             }
             else
             {
+                consecutive_failures = 0; // 성공 시 리셋
                 RCLCPP_INFO_ONCE(this->get_logger(), "Success, found camera");
             }
 
-            // 퍼블리셔에 이미지가 구독되고 있는지 확인
-            if (camera_image_pub.getNumSubscribers() > 0)
+            // 구독자 체크 - 없으면 CPU 절약
+            bool has_image_subscribers = camera_image_pub.getNumSubscribers() > 0;
+            bool has_info_subscribers = camera_info_pub->get_subscription_count() > 0;
+
+            if (has_image_subscribers)
             {
                 publishImage(camera_image, camera_image_pub, camera_frame_id_, now);
             }
 
-            if (camera_info_pub->get_subscription_count() > 0)
+            if (has_info_subscribers)
             {
                 publishCamInfo(camera_info_pub, camera_info, now);
             }
 
-            if (show_image_)
+            // 구독자가 전혀 없으면 프레임레이트를 대폭 낮춰서 CPU 절약
+            if (!has_image_subscribers && !has_info_subscribers)
             {
-                // cv::imshow("image", camera_image);
-                // cv::waitKey(10);
+                std::this_thread::sleep_for(std::chrono::milliseconds(200)); // 5fps 수준으로 감소
+                continue;
             }
 
-            r.sleep();
+            if (show_image_)
+            {
+                // OpenCV 디스플레이는 디버그 모드에서만 (CPU 절약)
+                // cv::imshow("image", camera_image);
+                // cv::waitKey(1);
+            }
+
+            // 적응적 프레임레이트 제어 - 처리 시간에 따라 동적 조정
+            auto frame_end_time = std::chrono::steady_clock::now();
+            auto frame_duration = frame_end_time - frame_start_time;
+
+            // 프레임 처리가 목표 시간을 초과하면 경고 (성능 모니터링)
+            if (frame_duration > target_frame_duration)
+            {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                                     "Frame processing taking longer than target: %.2fms vs %.2fms. Consider reducing frame rate.",
+                                     std::chrono::duration<double, std::milli>(frame_duration).count(),
+                                     std::chrono::duration<double, std::milli>(target_frame_duration).count());
+            }
+
+            // 남은 시간만큼 정확히 sleep (기존 r.sleep() 대신)
+            auto elapsed_since_last = frame_end_time - last_frame_time;
+            if (elapsed_since_last < target_frame_duration)
+            {
+                auto sleep_duration = target_frame_duration - elapsed_since_last;
+                std::this_thread::sleep_for(sleep_duration);
+            }
+
+            last_frame_time = std::chrono::steady_clock::now();
         }
-        RCLCPP_DEBUG(this->get_logger(), "This is a debug message.");
+
+        RCLCPP_DEBUG(this->get_logger(), "Camera polling thread terminated.");
     }
 
     rcl_interfaces::msg::SetParametersResult on_parameter_change(
